@@ -342,6 +342,9 @@ function fix_disk_layout {
     # contents of /opt over.
     SWAPSIZE=8192
     swapcurrent=$(( $(grep SwapTotal /proc/meminfo | awk '{ print $2; }') / 1024 ))
+    cat /proc/meminfo
+    grep SwapTotal /proc/meminfo | awk '{ print $2; }'
+    swapcurrent=9000  ## no!
 
     if [[ $swapcurrent -lt $SWAPSIZE ]]; then
         if [ -b /dev/xvde ]; then
