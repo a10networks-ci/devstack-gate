@@ -28,10 +28,19 @@ GIT_BRANCH=${GIT_BRANCH:-master}
 # We're using enough ansible specific features that it's extremely
 # possible that new ansible releases can break us. As such we should
 # be very deliberate about which ansible we use.
-ANSIBLE_VERSION=${ANSIBLE_VERSION:-2.0.0.2}
+ANSIBLE_VERSION=${ANSIBLE_VERSION:-2.2.0.0}
+export DSTOOLS_VERSION=${DSTOOLS_VERSION:-0.1.4}
 
 # sshd may have been compiled with a default path excluding */sbin
 export PATH=$PATH:/usr/local/sbin:/usr/sbin
+# When doing xtrace (set -x / set -o xtrace), provide more debug output
+export PS4='+ ${BASH_SOURCE:-}:${FUNCNAME[0]:-}:L${LINENO:-}:   '
+
+#check to see if WORKSPACE var is defined
+if [ -z ${WORKSPACE} ]; then
+    echo "The 'WORKSPACE' variable is undefined. It must be defined for this script to work"
+    exit 1
+fi
 
 source $WORKSPACE/devstack-gate/functions.sh
 
@@ -45,17 +54,9 @@ JOB_PROJECTS="$PROJECTS"
 PROJECTS="openstack-infra/devstack-gate $PROJECTS"
 PROJECTS="openstack-dev/devstack $PROJECTS"
 PROJECTS="openstack-dev/pbr $PROJECTS"
-PROJECTS="openstack-infra/tripleo-ci $PROJECTS"
-PROJECTS="openstack/automaton $PROJECTS"
 PROJECTS="openstack/ceilometer $PROJECTS"
 PROJECTS="openstack/ceilometermiddleware $PROJECTS"
 PROJECTS="openstack/cinder $PROJECTS"
-PROJECTS="openstack/cliff $PROJECTS"
-PROJECTS="openstack/debtcollector $PROJECTS"
-PROJECTS="openstack/dib-utils $PROJECTS"
-PROJECTS="openstack/diskimage-builder $PROJECTS"
-PROJECTS="openstack/django_openstack_auth $PROJECTS"
-PROJECTS="openstack/futurist $PROJECTS"
 PROJECTS="openstack/glance $PROJECTS"
 PROJECTS="openstack/glance_store $PROJECTS"
 PROJECTS="openstack/heat $PROJECTS"
@@ -65,21 +66,44 @@ PROJECTS="openstack/horizon $PROJECTS"
 PROJECTS="openstack/keystone $PROJECTS"
 PROJECTS="openstack/keystoneauth $PROJECTS"
 PROJECTS="openstack/keystonemiddleware $PROJECTS"
+PROJECTS="openstack/neutron $PROJECTS"
+PROJECTS="openstack/nova $PROJECTS"
+PROJECTS="openstack/requirements $PROJECTS"
+PROJECTS="openstack/swift $PROJECTS"
+PROJECTS="openstack/tempest $PROJECTS"
+PROJECTS="openstack/tempest-lib $PROJECTS"
+# Everything below this line in the PROJECTS list is for non
+# default devstack runs. Overtime we should remove items from
+# below and add them explicitly to the jobs that need them. The
+# reason for this is to reduce job runtimes, every git repo
+# has to be cloned and updated and checked out to the proper ref
+# which is not free.
+PROJECTS="openstack-infra/tripleo-ci $PROJECTS"
+PROJECTS="openstack/automaton $PROJECTS"
+PROJECTS="openstack/cliff $PROJECTS"
+PROJECTS="openstack/debtcollector $PROJECTS"
+# The devstack heat plugin uses these repos
+if [[ "$DEVSTACK_GATE_HEAT" -eq "1" ]] ; then
+    PROJECTS="openstack/dib-utils $PROJECTS"
+    PROJECTS="openstack/diskimage-builder $PROJECTS"
+fi
+PROJECTS="openstack/django_openstack_auth $PROJECTS"
+PROJECTS="openstack/futurist $PROJECTS"
 PROJECTS="openstack/manila $PROJECTS"
 PROJECTS="openstack/manila-ui $PROJECTS"
 PROJECTS="openstack/zaqar $PROJECTS"
-PROJECTS="openstack/neutron $PROJECTS"
 PROJECTS="openstack/neutron-fwaas $PROJECTS"
 PROJECTS="openstack/neutron-lbaas $PROJECTS"
 PROJECTS="openstack/octavia $PROJECTS"
 PROJECTS="openstack/neutron-vpnaas $PROJECTS"
-PROJECTS="openstack/nova $PROJECTS"
 PROJECTS="openstack/os-apply-config $PROJECTS"
 PROJECTS="openstack/os-brick $PROJECTS"
+PROJECTS="openstack/os-client-config $PROJECTS"
 PROJECTS="openstack/os-cloud-config $PROJECTS"
 PROJECTS="openstack/os-collect-config $PROJECTS"
 PROJECTS="openstack/os-net-config $PROJECTS"
 PROJECTS="openstack/os-refresh-config $PROJECTS"
+PROJECTS="openstack/osc-lib $PROJECTS"
 PROJECTS="openstack/oslo.cache $PROJECTS"
 PROJECTS="openstack/oslo.concurrency $PROJECTS"
 PROJECTS="openstack/oslo.config $PROJECTS"
@@ -98,14 +122,10 @@ PROJECTS="openstack/oslo.service $PROJECTS"
 PROJECTS="openstack/oslo.versionedobjects $PROJECTS"
 PROJECTS="openstack/oslo.vmware $PROJECTS"
 PROJECTS="openstack/pycadf $PROJECTS"
-PROJECTS="openstack/requirements $PROJECTS"
 PROJECTS="openstack/sahara $PROJECTS"
 PROJECTS="openstack/sahara-dashboard $PROJECTS"
 PROJECTS="openstack/stevedore $PROJECTS"
-PROJECTS="openstack/swift $PROJECTS"
 PROJECTS="openstack/taskflow $PROJECTS"
-PROJECTS="openstack/tempest $PROJECTS"
-PROJECTS="openstack/tempest-lib $PROJECTS"
 PROJECTS="openstack/tooz $PROJECTS"
 PROJECTS="openstack/tripleo-heat-templates $PROJECTS"
 PROJECTS="openstack/tripleo-image-elements $PROJECTS"
@@ -168,11 +188,36 @@ export DEVSTACK_GATE_TEMPEST_DISABLE_TENANT_ISOLATION=${DEVSTACK_GATE_TEMPEST_DI
 # Set to 1 to enable Cinder secure delete.
 # False by default to avoid dd problems on Precise.
 # https://bugs.launchpad.net/ubuntu/+source/linux/+bug/1023755
+# TODO(mriedem): CINDER_SECURE_DELETE is deprecated in devstack as of liberty.
+# Remove after kilo-eol happens in devstack.
 export DEVSTACK_CINDER_SECURE_DELETE=${DEVSTACK_CINDER_SECURE_DELETE:-0}
 
+# Should cinder perform secure deletion of volumes?
+# Defaults to none to avoid bug 1023755. Can also be set to zero or shred.
+# Only applicable to stable/liberty+ devstack.
+export DEVSTACK_CINDER_VOLUME_CLEAR=${DEVSTACK_CINDER_VOLUME_CLEAR:-none}
+
+# Set this to override the branch selected for testing (in
+# single-branch checkouts; not used for grenade)
+export OVERRIDE_ZUUL_BRANCH=${OVERRIDE_ZUUL_BRANCH:-$ZUUL_BRANCH}
+
+stable_compare="stable/[a-n]"
+
 # Set to 1 to run neutron instead of nova network
-# Only applicable to master branch
-export DEVSTACK_GATE_NEUTRON=${DEVSTACK_GATE_NEUTRON:-0}
+# This is a bit complicated to handle the deprecation of nova net across
+# repos with branches from this branchless job runner.
+if [ -n "$DEVSTACK_GATE_NEUTRON" ] ; then
+    # If someone has made a choice externally honor it
+    export DEVSTACK_GATE_NEUTRON=$DEVSTACK_GATE_NEUTRON
+elif [[ "$OVERRIDE_ZUUL_BRANCH" =~ $stable_compare ]] ; then
+    # Default to no neutron on older stable branches because nova net
+    # was the default all that time.
+    export DEVSTACK_GATE_NEUTRON=0
+else
+    # For everything else there is neutron
+    export DEVSTACK_GATE_NEUTRON=1
+fi
+
 
 # Set to 1 to run neutron distributed virtual routing
 export DEVSTACK_GATE_NEUTRON_DVR=${DEVSTACK_GATE_NEUTRON_DVR:-0}
@@ -199,7 +244,7 @@ export DEVSTACK_GATE_SAHARA=${DEVSTACK_GATE_SAHARA:-0}
 export DEVSTACK_GATE_TROVE=${DEVSTACK_GATE_TROVE:-0}
 
 # Set to 0 to disable config_drive and use the metadata server instead
-export DEVSTACK_GATE_CONFIGDRIVE=${DEVSTACK_GATE_CONFIGDRIVE:-1}
+export DEVSTACK_GATE_CONFIGDRIVE=${DEVSTACK_GATE_CONFIGDRIVE:-0}
 
 # Set to 1 to enable installing test requirements
 export DEVSTACK_GATE_INSTALL_TESTONLY=${DEVSTACK_GATE_INSTALL_TESTONLY:-0}
@@ -221,10 +266,6 @@ export DEVSTACK_PROJECT_FROM_GIT=${DEVSTACK_PROJECT_FROM_GIT:-}
 # i.e. stable/juno:
 #   pullup means stable/icehouse => stable/juno
 #   forward means stable/juno => master (or stable/kilo if that's out)
-#   partial-ncpu means stable/icehouse => stable/juno but keep nova
-#       compute at stable/icehouse
-#   partial-ironic means stable/icehouse => stable/juno but keep ironic
-#       compute at stable/icehouse
 export DEVSTACK_GATE_GRENADE=${DEVSTACK_GATE_GRENADE:-}
 
 # the branch name for selecting grenade branches
@@ -277,20 +318,12 @@ if [[ -n "$DEVSTACK_GATE_GRENADE" ]]; then
                 export GRENADE_NEW_BRANCH="stable/mitaka"
             elif [[ "$GRENADE_BASE_BRANCH" == "stable/mitaka" ]]; then
                 export GRENADE_OLD_BRANCH="stable/mitaka"
+                export GRENADE_NEW_BRANCH="stable/newton"
+            elif [[ "$GRENADE_BASE_BRANCH" == "stable/newton" ]]; then
+                export GRENADE_OLD_BRANCH="stable/newton"
                 export GRENADE_NEW_BRANCH="$GIT_BRANCH"
             fi
             ;;
-
-        # partial upgrades are like normal upgrades except they leave
-        # certain services behind. We use the base 4 operator ';&'
-        # here to fall trhough to the next conditionals
-        partial-*)
-            if [[ "$DEVSTACK_GATE_GRENADE" == "partial-ncpu" ]]; then
-                export DO_NOT_UPGRADE_SERVICES=[n-cpu]
-            elif [[ "$DEVSTACK_GATE_GRENADE" == "partial-ironic" ]]; then
-                export DO_NOT_UPGRADE_SERVICES=[ir-api,ir-cond]
-            fi
-            ;&
 
         # pullup upgrades are our normal upgrade test. Can you upgrade
         # to the current patch from the last stable.
@@ -307,8 +340,11 @@ if [[ -n "$DEVSTACK_GATE_GRENADE" ]]; then
             elif [[ "$GRENADE_BASE_BRANCH" == "stable/mitaka" ]]; then
                 export GRENADE_OLD_BRANCH="stable/liberty"
                 export GRENADE_NEW_BRANCH="stable/mitaka"
-            else # master
+            elif [[ "$GRENADE_BASE_BRANCH" == "stable/newton" ]]; then
                 export GRENADE_OLD_BRANCH="stable/mitaka"
+                export GRENADE_NEW_BRANCH="stable/newton"
+            else # master
+                export GRENADE_OLD_BRANCH="stable/newton"
                 export GRENADE_NEW_BRANCH="$GIT_BRANCH"
             fi
             ;;
@@ -374,10 +410,6 @@ export DEVSTACK_GATE_REMOVE_STACK_SUDO=${DEVSTACK_GATE_REMOVE_STACK_SUDO:-1}
 # dependency-only installation.
 export DEVSTACK_GATE_UNSTACK=${DEVSTACK_GATE_UNSTACK:-0}
 
-# Set this to override the branch selected for testing (in
-# single-branch checkouts; not used for grenade)
-export OVERRIDE_ZUUL_BRANCH=${OVERRIDE_ZUUL_BRANCH:-$ZUUL_BRANCH}
-
 # Set Ceilometer backend to override the default one. It could be mysql,
 # postgresql, mongodb.
 export DEVSTACK_GATE_CEILOMETER_BACKEND=${DEVSTACK_GATE_CEILOMETER_BACKEND:-mysql}
@@ -398,6 +430,11 @@ export DEVSTACK_GATE_TOPOLOGY=${DEVSTACK_GATE_TOPOLOGY:-aio}
 # Minimizing the number of targeted projects can reduce the setup cost
 # for jobs that know exactly which repos they need.
 export DEVSTACK_GATE_PROJECTS_OVERRIDE=${DEVSTACK_GATE_PROJECTS_OVERRIDE:-""}
+
+# Set this to "True" to force devstack to pick python 3.x. "False" will cause
+# devstack to pick python 2.x. We should leave this empty for devstack to
+# pick the default.
+export DEVSTACK_GATE_USE_PYTHON3=${DEVSTACK_GATE_USE_PYTHON3:-""}
 
 # Set this to enable remote logging of the console via UDP packets to
 # a specified ipv4 ip:port (note; not hostname -- ip address only).
@@ -439,34 +476,41 @@ with $DEVSTACK_GATE_TIMEOUT_BUFFER minutes reserved for cleanup."
 echo "Available disk space on this host:"
 indent df -h
 
-# Enable tracing while we transition to using ansible to run
-# setup across multiple nodes.
-set -x
 # Install ansible
 sudo -H pip install virtualenv
 virtualenv /tmp/ansible
-/tmp/ansible/bin/pip install ansible==$ANSIBLE_VERSION
+# NOTE(emilien): workaround to avoid installing cryptography
+# https://github.com/ansible/ansible/issues/15665
+/tmp/ansible/bin/pip install paramiko==1.16.0 ansible==$ANSIBLE_VERSION ara
 export ANSIBLE=/tmp/ansible/bin/ansible
+export ANSIBLE_PLAYBOOK=/tmp/ansible/bin/ansible-playbook
 
 # Write inventory file with groupings
 COUNTER=1
 echo "[primary]" > "$WORKSPACE/inventory"
 echo "localhost ansible_connection=local host_counter=$COUNTER" >> "$WORKSPACE/inventory"
 echo "[subnodes]" >> "$WORKSPACE/inventory"
-SUBNODES=$(cat /etc/nodepool/sub_nodes_private)
+export SUBNODES=$(cat /etc/nodepool/sub_nodes_private)
 for SUBNODE in $SUBNODES ; do
     let COUNTER=COUNTER+1
     echo "$SUBNODE host_counter=$COUNTER" >> "$WORKSPACE/inventory"
 done
+
+# Write ansible config file
+cat > "$WORKSPACE/ansible.cfg" <<EOF
+[defaults]
+callback_plugins = $WORKSPACE/devstack-gate/playbooks/plugins/callback:/tmp/ansible/lib/python2.7/site-packages/ara/plugins/callbacks
+stdout_callback = devstack
+EOF
 
 # NOTE(clarkb): for simplicity we evaluate all bash vars in ansible commands
 # on the node running these scripts, we do not pass through unexpanded
 # vars to ansible shell commands. This may need to change in the future but
 # for now the current setup is simple, consistent and easy to understand.
 
-# Copy bootstrap to remote hosts
-# It is in brackets for avoiding inheriting a huge environment variable
+# This is in brackets for avoiding inheriting a huge environment variable
 (export PROJECTS; export > "$WORKSPACE/test_env.sh")
+# Copy bootstrap to remote hosts
 $ANSIBLE subnodes -f 5 -i "$WORKSPACE/inventory" -m copy \
     -a "src='$WORKSPACE/devstack-gate' dest='$WORKSPACE'"
 $ANSIBLE subnodes -f 5 -i "$WORKSPACE/inventory" -m copy \
@@ -505,8 +549,10 @@ EOF
 }
 
 echo "... this takes a few seconds (logs at logs/devstack-gate-setup-host.txt.gz)"
+$ANSIBLE_PLAYBOOK -f 5 -i "$WORKSPACE/inventory" "$WORKSPACE/devstack-gate/playbooks/setup_host.yaml" \
+    &> "$WORKSPACE/logs/devstack-gate-setup-host.txt"
 $ANSIBLE all -f 5 -i "$WORKSPACE/inventory" -m shell \
-    -a "$(run_command setup_host)" &> "$WORKSPACE/logs/devstack-gate-setup-host.txt"
+    -a "$(run_command setup_host)" &>> "$WORKSPACE/logs/devstack-gate-setup-host.txt"
 
 if [ -n "$DEVSTACK_GATE_GRENADE" ]; then
     start=$(date +%s)
@@ -563,15 +609,23 @@ fi
 # devstack-vm-gate-wrap.sh will not automagically run the hooks on each node.
 # Run pre test hook if we have one
 with_timeout call_hook_if_defined "pre_test_hook"
+GATE_RETVAL=$?
+if [ $GATE_RETVAL -ne 0 ]; then
+    echo "ERROR: the pre-test setup script run by this job failed - exit code: $GATE_RETVAL"
+fi
 
 # Run the gate function
-echo "Running gate_hook"
-with_timeout "gate_hook"
-GATE_RETVAL=$?
+if [ $GATE_RETVAL -eq 0 ]; then
+    echo "Running gate_hook"
+    with_timeout "gate_hook"
+    GATE_RETVAL=$?
+    if [ $GATE_RETVAL -ne 0 ]; then
+        echo "ERROR: the main setup script run by this job failed - exit code: $GATE_RETVAL"
+    fi
+fi
 RETVAL=$GATE_RETVAL
 
 if [ $GATE_RETVAL -ne 0 ]; then
-    echo "ERROR: the main setup script run by this job failed - exit code: $GATE_RETVAL"
     echo "    please look at the relevant log files to determine the root cause"
     echo "Running devstack worlddump.py"
     sudo $BASE/new/devstack/tools/worlddump.py -d $BASE/logs
@@ -596,7 +650,10 @@ echo "... this takes 3 - 4 minutes (logs at logs/devstack-gate-cleanup-host.txt.
 $ANSIBLE all -f 5 -i "$WORKSPACE/inventory" -m shell \
     -a "$(run_command cleanup_host)" &> "$WORKSPACE/devstack-gate-cleanup-host.txt"
 $ANSIBLE subnodes -f 5 -i "$WORKSPACE/inventory" -m synchronize \
-    -a "mode=pull src='$BASE/logs/' dest='$BASE/logs/subnode-{{ host_counter }}'"
+    -a "mode=pull src='$BASE/logs/' dest='$BASE/logs/subnode-{{ host_counter }}' copy_links=yes"
 sudo mv $WORKSPACE/devstack-gate-cleanup-host.txt $BASE/logs/
+
+# Generate ARA report
+/tmp/ansible/bin/ara generate $BASE/logs/ara
 
 exit $RETVAL

@@ -140,9 +140,8 @@ By comparison, a provider settings file for HPCloud::
 
 Note: The image regularly changes as new images are uploaded, for the
 specific image name currently used for tests, see
-`nodepool.yaml.erb <http://git.openstack.org/cgit/openstack-infra/
-system-config/tree/modules/openstack_project/templates/nodepool/
-nodepool.yaml.erb>`_.
+`nodepool.yaml <http://git.openstack.org/cgit/openstack-infra/
+project-config/tree/nodepool/nodepool.yaml>`_.
 
 Source the provider settings, boot a server named "testserver" (chosen
 arbitrarily for this example) with your SSH key allowed, and log into
@@ -253,3 +252,7 @@ You can file bugs on the storyboard devstack-gate project::
     https://storyboard.openstack.org/#!/project/712
 
 And you can chat with us on Freenode in #openstack-qa or #openstack-infra.
+
+It's worth noting that, while devstack-gate is generally licensed under the
+Apache license, `playbooks/plugins/callback/devstack.py` is GPLv3 due to having
+derived from the Ansible source code.

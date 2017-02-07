@@ -1,7 +1,8 @@
 config:
   default:
-    master: [default, ceilometer, glance, horizon, nova, swift, cinder, keystone]
-    ocata: [default, ceilometer, glance, horizon, nova, swift, cinder, keystone]
+    master: [default, ceilometer, glance, horizon, nova, placement, swift, cinder, keystone]
+    ocata: [default, ceilometer, glance, horizon, nova, placement, swift, cinder, keystone]
+    newton: [default, ceilometer, glance, horizon, nova, swift, cinder, keystone]
     mitaka: [default, ceilometer, glance, horizon, nova, swift, cinder, keystone]
     liberty: [default, ceilometer, glance, horizon, nova, swift, cinder, keystone]
     kilo: [default, ceilometer, glance, horizon, nova, swift, cinder, keystone]
@@ -17,7 +18,7 @@ config:
     features: [postgresql]
   # feature changes for different test matrixes
   grenade:
-    rm-features: [trove, sahara, neutron-adv]
+    rm-features: [trove, sahara, neutron-adv, horizon]
   tempest:
     features: [tempest]
   # feature changes for different configs of existing services
@@ -47,14 +48,18 @@ config:
     features: [heat]
   tlsproxy:
     features: [tlsproxy]
+  cinder_mn_grenade:
+    features: [cinder-mn-grenade]
+  neutron_dvr:
+    features: [neutron-dvr]
 
 branches:
   # The value of ""default" is the name of the "trunk" branch
   default: master
   # Normalized branch names only here, e.g. stable/icehouse => icehouse
-  allowed: [master, ocata, mitaka, liberty, kilo, juno, icehouse]
+  allowed: [master, ocata, newton, mitaka, liberty, kilo, juno, icehouse]
 
-features:
+primary:
   default:
     base:
       services: [mysql, rabbit, dstat]
@@ -77,7 +82,7 @@ features:
 
   nova:
     base:
-      services: [n-api, n-cond, n-cpu, n-crt, n-net, n-obj, n-sch]
+      services: [n-api, n-cauth, n-cond, n-cpu, n-crt, n-net, n-novnc, n-obj, n-sch]
     icehouse:
       compute-ext:
 
@@ -90,6 +95,10 @@ features:
       services: [n-cell]
       rm-compute-ext: [agregates, hosts]
 
+  placement:
+    base:
+      services: [placement-api]
+
   neutron:
     base:
       services: [quantum, q-svc, q-agt, q-dhcp, q-l3, q-meta, q-metering]
@@ -97,10 +106,17 @@ features:
 
   neutron-adv:
     base:
-      services: [q-lbaas, q-fwaas]
       rm-services: [n-net]
+    mitaka:
+      services: [q-lbaas]
+    liberty:
+      services: [q-lbaas]
     kilo:
       services: [q-vpn]
+
+  neutron-dvr:
+    base:
+      services: []
 
   swift:
     base:
@@ -109,6 +125,12 @@ features:
   cinder:
     base:
       services: [cinder, c-api, c-vol, c-sch, c-bak]
+
+  # This will be used to disable c-vol on primary node when running multinode grenade
+  # job that will test compatibility of new c-api, c-sch (primary) and old c-vol and c-bak (sub).
+  cinder-mn-grenade:
+    base:
+      rm-services: [c-vol, c-bak]
 
   heat:
     base:
@@ -162,3 +184,85 @@ features:
   tlsproxy:
     base:
       services: [tls-proxy]
+    # TLS proxy didn't work properly until ocata
+    liberty:
+      rm-services: [tls-proxy]
+    mitaka:
+      rm-services: [tls-proxy]
+    newton:
+      rm-services: [tls-proxy]
+
+subnode:
+  default:
+    base:
+      services: [dstat]
+
+  ceilometer:
+    base:
+      services: [ceilometer-acompute]
+
+  cinder:
+    base:
+      services: [c-vol, c-bak]
+
+  cinder-mn-grenade:
+    base:
+      services: []
+
+  glance:
+    base:
+      services: []
+
+  horizon:
+    base:
+      services: []
+
+  ironic:
+    base:
+      rm-services: [c-vol, c-bak]
+      services: [ir-api, ir-cond]
+
+  keystone:
+    base:
+      services: []
+
+  neutron:
+    base:
+      rm-services: [n-net, n-api-meta]
+      services: [q-agt]
+
+  neutron-adv:
+    base:
+      services: []
+
+  neutron-dvr:
+    base:
+      rm-services: [n-net, n-api-meta]
+      services: [q-agt, q-l3, q-meta]
+
+  nova:
+    base:
+      services: [n-cpu, n-net, n-api-meta]
+
+  placement:
+    base:
+      services: [placement-client]
+
+  swift:
+    base:
+      services: []
+
+  tempest:
+    base:
+      services: []
+
+  tlsproxy:
+    base:
+      services: [tls-proxy]
+    # TLS proxy didn't work properly until ocata
+    liberty:
+      rm-services: [tls-proxy]
+    mitaka:
+      rm-services: [tls-proxy]
+    newton:
+      rm-services: [tls-proxy]

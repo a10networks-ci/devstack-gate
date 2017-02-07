@@ -33,7 +33,9 @@ source $TOP_DIR/functions.sh
 echo $PPID > $WORKSPACE/gate.pid
 source `dirname "$(readlink -f "$0")"`/functions.sh
 
+# Need to set FIXED_RANGE for pre-ocata devstack
 FIXED_RANGE=${DEVSTACK_GATE_FIXED_RANGE:-10.1.0.0/20}
+IPV4_ADDRS_SAFE_TO_USE=${DEVSTACK_GATE_IPV4_ADDRS_SAFE_TO_USE:-${DEVSTACK_GATE_FIXED_RANGE:-10.1.0.0/20}}
 FLOATING_RANGE=${DEVSTACK_GATE_FLOATING_RANGE:-172.24.5.0/24}
 PUBLIC_NETWORK_GATEWAY=${DEVSTACK_GATE_PUBLIC_NETWORK_GATEWAY:-172.24.5.1}
 # The next two values are used in multinode testing and are related
@@ -57,13 +59,19 @@ LOCAL_MTU=$(ip link show | sed -ne 's/.*mtu \([0-9]\+\).*/\1/p' | sort -n | head
 EXTERNAL_BRIDGE_MTU=$((LOCAL_MTU - 50))
 
 function setup_ssh {
+    # Copy the SSH key from /etc/nodepool/id_rsa{.pub} to the specified
+    # directory on 'all' the nodes. 'all' the nodes consists of the primary
+    # node and all of the subnodes.
     local path=$1
+    local dest_file=${2:-id_rsa}
     $ANSIBLE all --sudo -f 5 -i "$WORKSPACE/inventory" -m file \
         -a "path='$path' mode=0700 state=directory"
     $ANSIBLE all --sudo -f 5 -i "$WORKSPACE/inventory" -m copy \
         -a "src=/etc/nodepool/id_rsa.pub dest='$path/authorized_keys' mode=0600"
     $ANSIBLE all --sudo -f 5 -i "$WORKSPACE/inventory" -m copy \
-        -a "src=/etc/nodepool/id_rsa dest='$path/id_rsa' mode=0400"
+        -a "src=/etc/nodepool/id_rsa.pub dest='$path/${dest_file}.pub' mode=0600"
+    $ANSIBLE all --sudo -f 5 -i "$WORKSPACE/inventory" -m copy \
+        -a "src=/etc/nodepool/id_rsa dest='$path/${dest_file}' mode=0400"
 }
 
 function setup_nova_net_networking {
@@ -132,6 +140,33 @@ EOF
                         $sub_nodes
     fi
 
+    if [[ "$DEVSTACK_GATE_IRONIC" -eq '1' ]]; then
+        # NOTE(vsaienko) Ironic VMs will be connected to this bridge
+        # in order to have access to VMs on another nodes.
+        ovs_vxlan_bridge "br_ironic_vxlan" $primary_node "False" 128 \
+            $sub_nodes
+
+        cat <<EOF >>"$sub_localrc"
+HOST_TOPOLOGY=multinode
+HOST_TOPOLOGY_ROLE=subnode
+# NOTE(vsaienko) we assume for now that we using only 1 subnode,
+# each subnode should have different switch name (bridge) as it is used
+# by networking-generic-switch to uniquely identify switch.
+IRONIC_VM_NETWORK_BRIDGE=sub1brbm
+OVS_PHYSICAL_BRIDGE=sub1brbm
+ENABLE_TENANT_TUNNELS=False
+IRONIC_KEY_FILE="$BASE/new/.ssh/ironic_key"
+EOF
+        cat <<EOF >>"$localrc"
+HOST_TOPOLOGY=multinode
+HOST_TOPOLOGY_ROLE=primary
+HOST_TOPOLOGY_SUBNODES="$sub_nodes"
+IRONIC_KEY_FILE="$BASE/new/.ssh/ironic_key"
+GENERIC_SWITCH_KEY_FILE="$BASE/new/.ssh/ironic_key"
+ENABLE_TENANT_TUNNELS=False
+EOF
+    fi
+
     echo "Preparing cross node connectivity"
     setup_ssh $BASE/new/.ssh
     setup_ssh ~root/.ssh
@@ -161,6 +196,16 @@ EOF
         remote_copy_file /tmp/tmp_sub_localrc $NODE:$devstack_dir/localrc
         remote_copy_file $localconf $NODE:$localconf
     done
+
+    # NOTE(vsaienko) we need to have ssh connection among nodes to manage
+    # VMs from ironic-conductor or setup networking from networking-generic-switch
+    if [[ "$DEVSTACK_GATE_IRONIC" -eq '1' ]]; then
+        echo "Copy ironic key among nodes"
+        # NOTE(vsaienko) setup_ssh() set 700 to all parent directories when they doesn't
+        # exist. Keep ironic keys in other directory than /opt/stack/data to avoid setting
+        # 700 on /opt/stack/data
+        setup_ssh $BASE/new/.ssh ironic_key
+    fi
 }
 
 function setup_networking {
@@ -177,6 +222,22 @@ function setup_networking {
     elif [[ "$DEVSTACK_GATE_TOPOLOGY" == "multinode" ]]; then
         setup_multinode_connectivity $mode
     fi
+}
+
+# Discovers compute nodes (subnodes) and maps them to cells.
+# NOTE(mriedem): We want to remove this if/when nova supports auto-registration
+# of computes with cells, but that's not happening in Ocata.
+function discover_hosts {
+    # We have to run this on the primary node AFTER the subnodes have been
+    # setup. Since discover_hosts is really only needed for Ocata, this checks
+    # to see if the script exists in the devstack installation first.
+    # NOTE(danms): This is ||'d with an assertion that the script does not exist,
+    # so that if we actually failed the script, we'll exit nonzero here instead
+    # of ignoring failures along with the case where there is no script.
+    # TODO(mriedem): Would be nice to do this with wrapped lines.
+    $ANSIBLE primary -f 5 -i "$WORKSPACE/inventory" -m shell \
+        -a "cd $BASE/new/devstack/ && (test -f tools/discover_hosts.sh && sudo -H -u stack DSTOOLS_VERSION=$DSTOOLS_VERSION stdbuf -oL -eL ./tools/discover_hosts.sh) || (! test -f tools/discover_hosts.sh)" \
+        &> "$WORKSPACE/logs/devstack-gate-discover-hosts.txt"
 }
 
 function setup_localrc {
@@ -210,26 +271,16 @@ function setup_localrc {
                 sudo yum install -y PyYAML
             fi
         fi
-        MY_ENABLED_SERVICES=`cd $BASE/new/devstack-gate && ./test-matrix.py -b $branch_for_matrix -f $DEVSTACK_GATE_FEATURE_MATRIX`
-        local original_enabled_services=$MY_ENABLED_SERVICES
 
-        # TODO(afazekas): Move to the feature grid
-        # TODO(afazekas): add c-vol
+        local test_matrix_role='primary'
         if [[ $role = sub ]]; then
-            MY_ENABLED_SERVICES="n-cpu,ceilometer-acompute,dstat"
-            if [[ "$DEVSTACK_GATE_NEUTRON" -eq "1" ]]; then
-                MY_ENABLED_SERVICES+=",q-agt"
-                if [[ "$DEVSTACK_GATE_NEUTRON_DVR" -eq "1" ]]; then
-                    # As per reference architecture described in
-                    # https://wiki.openstack.org/wiki/Neutron/DVR
-                    # for DVR multi-node, add the following services
-                    # on all compute nodes (q-fwaas being optional):
-                    MY_ENABLED_SERVICES+=",q-l3,q-fwaas,q-meta"
-                fi
-            else
-                MY_ENABLED_SERVICES+=",n-net,n-api-meta"
-            fi
+            test_matrix_role='subnode'
         fi
+
+        MY_ENABLED_SERVICES=$(cd $BASE/new/devstack-gate && ./test-matrix.py -b $branch_for_matrix -f $DEVSTACK_GATE_FEATURE_MATRIX -r $test_matrix_role)
+        local original_enabled_services=$(cd $BASE/new/devstack-gate && ./test-matrix.py -b $branch_for_matrix -f $DEVSTACK_GATE_FEATURE_MATRIX -r primary)
+        echo "MY_ENABLED_SERVICES: ${MY_ENABLED_SERVICES}"
+        echo "original_enabled_services: ${original_enabled_services}"
 
         # Allow optional injection of ENABLED_SERVICES from the calling context
         if [[ ! -z $ENABLED_SERVICES ]] ; then
@@ -237,10 +288,13 @@ function setup_localrc {
         fi
     fi
 
+    if [[ ! -z $DEVSTACK_GATE_USE_PYTHON3 ]] ; then
+        echo "USE_PYTHON3=$DEVSTACK_GATE_USE_PYTHON3" >>"$localrc_file"
+    fi
+
     if [[ "$DEVSTACK_GATE_CEPH" == "1" ]]; then
         echo "CINDER_ENABLED_BACKENDS=ceph:ceph" >>"$localrc_file"
         echo "TEMPEST_STORAGE_PROTOCOL=ceph" >>"$localrc_file"
-        echo "CEPH_LOOPBACK_DISK_SIZE=8G" >>"$localrc_file"
     fi
 
     # the exercises we *don't* want to test on for devstack
@@ -284,15 +338,17 @@ ROOTSLEEP=0
 # to correctly do testing. Otherwise you are not testing
 # the code you have posted for review.
 ERROR_ON_CLONE=True
+# Since git clone can't be used for novnc in gates, force it to install the packages
+NOVNC_FROM_PACKAGE=True
 ENABLED_SERVICES=$MY_ENABLED_SERVICES
 SKIP_EXERCISES=$SKIP_EXERCISES
-SERVICE_HOST=127.0.0.1
 # Screen console logs will capture service logs.
 SYSLOG=False
 SCREEN_LOGDIR=$BASE/$localrc_oldnew/screen-logs
 LOGFILE=$BASE/$localrc_oldnew/devstacklog.txt
 VERBOSE=True
 FIXED_RANGE=$FIXED_RANGE
+IPV4_ADDRS_SAFE_TO_USE=$IPV4_ADDRS_SAFE_TO_USE
 FLOATING_RANGE=$FLOATING_RANGE
 PUBLIC_NETWORK_GATEWAY=$PUBLIC_NETWORK_GATEWAY
 FIXED_NETWORK_SIZE=4096
@@ -305,15 +361,20 @@ CINDER_PERIODIC_INTERVAL=10
 export OS_NO_CACHE=True
 CEILOMETER_BACKEND=$DEVSTACK_GATE_CEILOMETER_BACKEND
 LIBS_FROM_GIT=$DEVSTACK_PROJECT_FROM_GIT
-DATABASE_QUERY_LOGGING=True
 # set this until all testing platforms have libvirt >= 1.2.11
 # see bug #1501558
 EBTABLES_RACE_FIX=True
 EOF
 
+    if [[ "$DEVSTACK_GATE_TOPOLOGY" == "multinode" ]] && [[ $DEVSTACK_GATE_NEUTRON -eq "1" ]]; then
+        # Reduce the MTU on br-ex to match the MTU of underlying tunnels
+        echo "PUBLIC_BRIDGE_MTU=$EXTERNAL_BRIDGE_MTU" >>"$localrc_file"
+    fi
+
     if [[ "$DEVSTACK_CINDER_SECURE_DELETE" -eq "0" ]]; then
         echo "CINDER_SECURE_DELETE=False" >>"$localrc_file"
     fi
+    echo "CINDER_VOLUME_CLEAR=${DEVSTACK_CINDER_VOLUME_CLEAR}" >>"$localrc_file"
 
     if [[ "$DEVSTACK_GATE_TEMPEST_HEAT_SLOW" -eq "1" ]]; then
         echo "HEAT_CREATE_TEST_IMAGE=False" >>"$localrc_file"
@@ -327,27 +388,20 @@ EOF
         fi
     fi
 
-    if [[ "$DEVSTACK_GATE_VIRT_DRIVER" == "openvz" ]]; then
-        echo "SKIP_EXERCISES=${SKIP_EXERCISES},volumes" >>"$localrc_file"
-        echo "DEFAULT_INSTANCE_TYPE=m1.small" >>"$localrc_file"
-        echo "DEFAULT_INSTANCE_USER=root" >>"$localrc_file"
-        echo "DEFAULT_INSTANCE_TYPE=m1.small" >>exerciserc
-        echo "DEFAULT_INSTANCE_USER=root" >>exerciserc
-    fi
-
     if [[ "$DEVSTACK_GATE_VIRT_DRIVER" == "ironic" ]]; then
-        export TEMPEST_OS_TEST_TIMEOUT=${DEVSTACK_GATE_OS_TEST_TIMEOUT:-900}
+        export TEMPEST_OS_TEST_TIMEOUT=${DEVSTACK_GATE_OS_TEST_TIMEOUT:-1200}
         echo "IRONIC_DEPLOY_DRIVER=$DEVSTACK_GATE_IRONIC_DRIVER" >>"$localrc_file"
-        echo "VIRT_DRIVER=ironic" >>"$localrc_file"
         echo "IRONIC_BAREMETAL_BASIC_OPS=True" >>"$localrc_file"
         echo "IRONIC_VM_LOG_DIR=$BASE/$localrc_oldnew/ironic-bm-logs" >>"$localrc_file"
         echo "DEFAULT_INSTANCE_TYPE=baremetal" >>"$localrc_file"
-        echo "BUILD_TIMEOUT=600" >>"$localrc_file"
+        echo "BUILD_TIMEOUT=${DEVSTACK_GATE_TEMPEST_BAREMETAL_BUILD_TIMEOUT:-600}" >>"$localrc_file"
         echo "IRONIC_CALLBACK_TIMEOUT=600" >>"$localrc_file"
         echo "Q_AGENT=openvswitch" >>"$localrc_file"
         echo "Q_ML2_TENANT_NETWORK_TYPE=vxlan" >>"$localrc_file"
         if [[ "$DEVSTACK_GATE_IRONIC_BUILD_RAMDISK" -eq 0 ]]; then
             echo "IRONIC_BUILD_DEPLOY_RAMDISK=False" >>"$localrc_file"
+        else
+            echo "IRONIC_BUILD_DEPLOY_RAMDISK=True" >>"$localrc_file"
         fi
         if [[ -z "${DEVSTACK_GATE_IRONIC_DRIVER%%agent*}" ]]; then
             echo "SWIFT_ENABLE_TEMPURLS=True" >>"$localrc_file"
@@ -357,11 +411,9 @@ EOF
             echo "IRONIC_VM_EPHEMERAL_DISK=0" >>"$localrc_file"
             # agent CoreOS ramdisk is a little heavy
             echo "IRONIC_VM_SPECS_RAM=1024" >>"$localrc_file"
-            echo "IRONIC_VM_COUNT=1" >>"$localrc_file"
         else
             echo "IRONIC_ENABLED_DRIVERS=fake,pxe_ssh,pxe_ipmitool" >>"$localrc_file"
             echo "IRONIC_VM_EPHEMERAL_DISK=1" >>"$localrc_file"
-            echo "IRONIC_VM_COUNT=3" >>"$localrc_file"
         fi
     fi
 
@@ -487,8 +539,8 @@ EOF
 
     if [[ "$DEVSTACK_GATE_TOPOLOGY" != "aio" ]]; then
         echo "NOVA_ALLOW_MOVE_TO_SAME_HOST=False" >> "$localrc_file"
-        echo "export LIVE_MIGRATION_AVAILABLE=True" >> "$localrc_file"
-        echo "export USE_BLOCK_MIGRATION_FOR_LIVE_MIGRATION=True" >> "$localrc_file"
+        echo "LIVE_MIGRATION_AVAILABLE=True" >> "$localrc_file"
+        echo "USE_BLOCK_MIGRATION_FOR_LIVE_MIGRATION=True" >> "$localrc_file"
         local primary_node=`cat /etc/nodepool/primary_node_private`
         echo "SERVICE_HOST=$primary_node" >>"$localrc_file"
 
@@ -534,6 +586,19 @@ EOF
 
 }
 
+# This makes the stack user own the $BASE files and also changes the
+# permissions on the logs directory so we can write to the logs when running
+# devstack or grenade. This must be called AFTER setup_localrc.
+function setup_access_for_stack_user {
+    # Make the workspace owned by the stack user
+    # It is not clear if the ansible file module can do this for us
+    $ANSIBLE all --sudo -f 5 -i "$WORKSPACE/inventory" -m shell \
+        -a "chown -R stack:stack '$BASE'"
+    # allow us to add logs
+    $ANSIBLE all --sudo -f 5 -i "$WORKSPACE/inventory" -m shell \
+        -a "chmod 777 '$WORKSPACE/logs'"
+}
+
 if [[ -n "$DEVSTACK_GATE_GRENADE" ]]; then
     cd $BASE/old/devstack
     setup_localrc "old" "localrc" "primary"
@@ -552,8 +617,8 @@ TARGET_DEVSTACK_DIR=\$TARGET_RELEASE_DIR/devstack
 TARGET_DEVSTACK_BRANCH=$GRENADE_NEW_BRANCH
 TARGET_RUN_SMOKE=False
 SAVE_DIR=\$BASE_RELEASE_DIR/save
-DO_NOT_UPGRADE_SERVICES=$DO_NOT_UPGRADE_SERVICES
 TEMPEST_CONCURRENCY=$TEMPEST_CONCURRENCY
+OS_TEST_TIMEOUT=$DEVSTACK_GATE_OS_TEST_TIMEOUT
 VERBOSE=False
 PLUGIN_DIR=\$TARGET_RELEASE_DIR
 EOF
@@ -566,9 +631,10 @@ EOF
     fi
 
     if [[ "$DEVSTACK_GATE_TOPOLOGY" == "multinode" ]]; then
-        echo -e "[[post-config|\$NOVA_CONF]]\n[libvirt]\ncpu_mode=custom\ncpu_model=gate64" >> local.conf
+        # ensure local.conf exists to remove conditional logic
+        touch local.conf
         if [[ $DEVSTACK_GATE_NEUTRON -eq "1" ]]; then
-            echo -e "[[post-config|\$NEUTRON_CONF]]\n[DEFAULT]\nnetwork_device_mtu=$EXTERNAL_BRIDGE_MTU" >> local.conf
+            echo -e "[[post-config|\$NEUTRON_CONF]]\n[DEFAULT]\nglobal_physnet_mtu=$EXTERNAL_BRIDGE_MTU" >> local.conf
         fi
 
         # get this in our base config
@@ -588,54 +654,63 @@ EOF
 
     setup_networking "grenade"
 
-    # Make the workspace owned by the stack user
-    # It is not clear if the ansible file module can do this for us
-    $ANSIBLE all --sudo -f 5 -i "$WORKSPACE/inventory" -m shell \
-        -a "chown -R stack:stack '$BASE'"
+    setup_access_for_stack_user
 
     echo "Running grenade ..."
     echo "This takes a good 30 minutes or more"
     cd $BASE/new/grenade
-    sudo -H -u stack stdbuf -oL -eL ./grenade.sh
+    sudo -H -u stack DSTOOLS_VERSION=$DSTOOLS_VERSION stdbuf -oL -eL ./grenade.sh
     cd $BASE/new/devstack
 
 else
     cd $BASE/new/devstack
     setup_localrc "new" "localrc" "primary"
     if [[ "$DEVSTACK_GATE_TOPOLOGY" == "multinode" ]]; then
-        echo -e "[[post-config|\$NOVA_CONF]]\n[libvirt]\ncpu_mode=custom\ncpu_model=gate64" >> local.conf
+        # ensure local.conf exists to remove conditional logic
+        touch local.conf
         if [[ $DEVSTACK_GATE_NEUTRON -eq "1" ]]; then
-            echo -e "[[post-config|\$NEUTRON_CONF]]\n[DEFAULT]\nnetwork_device_mtu=$EXTERNAL_BRIDGE_MTU" >> local.conf
+            echo -e "[[post-config|\$NEUTRON_CONF]]\n[DEFAULT]\nglobal_physnet_mtu=$EXTERNAL_BRIDGE_MTU" >> local.conf
         fi
     fi
 
     setup_networking
 
-    # Make the workspace owned by the stack user
-    # It is not clear if the ansible file module can do this for us
-    $ANSIBLE all --sudo -f 5 -i "$WORKSPACE/inventory" -m shell \
-        -a "chown -R stack:stack '$BASE'"
-    # allow us to add logs
-    $ANSIBLE all --sudo -f 5 -i "$WORKSPACE/inventory" -m shell \
-        -a "chmod 777 '$WORKSPACE/logs'"
+    setup_access_for_stack_user
 
     echo "Running devstack"
     echo "... this takes 10 - 15 minutes (logs in logs/devstacklog.txt.gz)"
     start=$(date +%s)
     $ANSIBLE primary -f 5 -i "$WORKSPACE/inventory" -m shell \
-        -a "cd '$BASE/new/devstack' && sudo -H -u stack stdbuf -oL -eL ./stack.sh executable=/bin/bash" \
+        -a "cd '$BASE/new/devstack' && sudo -H -u stack DSTOOLS_VERSION=$DSTOOLS_VERSION stdbuf -oL -eL ./stack.sh executable=/bin/bash" \
         &> "$WORKSPACE/logs/devstack-early.txt"
+    if [ -d "$BASE/data/CA" ] && [ -f "$BASE/data/ca-bundle.pem" ] ; then
+        # Sync any data files which include certificates to be used if
+        # TLS is enabled
+        $ANSIBLE subnodes -f 5 -i "$WORKSPACE/inventory" --sudo -m file \
+            -a "path='$BASE/data' state=directory owner=stack group=stack mode=0755"
+        $ANSIBLE subnodes -f 5 -i "$WORKSPACE/inventory" --sudo -m file \
+            -a "path='$BASE/data/CA' state=directory owner=stack group=stack mode=0755"
+        $ANSIBLE subnodes -f 5 -i "$WORKSPACE/inventory" \
+            --sudo -m synchronize \
+            -a "mode=push src='$BASE/data/ca-bundle.pem' dest='$BASE/data/ca-bundle.pem'"
+        sudo $ANSIBLE subnodes -f 5 -i "$WORKSPACE/inventory" \
+            --sudo -u $USER -m synchronize \
+            -a "mode=push src='$BASE/data/CA' dest='$BASE/data'"
+    fi
     # Run non controller setup after controller is up. This is necessary
     # because services like nova apparently expect to have the controller in
     # place before anything else.
     $ANSIBLE subnodes -f 5 -i "$WORKSPACE/inventory" -m shell \
-        -a "cd '$BASE/new/devstack' && sudo -H -u stack stdbuf -oL -eL ./stack.sh executable=/bin/bash" \
+        -a "cd '$BASE/new/devstack' && sudo -H -u stack DSTOOLS_VERSION=$DSTOOLS_VERSION stdbuf -oL -eL ./stack.sh executable=/bin/bash" \
         &> "$WORKSPACE/logs/devstack-subnodes-early.txt"
     end=$(date +%s)
     took=$((($end - $start) / 60))
     if [[ "$took" -gt 20 ]]; then
         echo "WARNING: devstack run took > 20 minutes, this is a very slow node."
     fi
+
+    # Discover the hosts on a cells v2 deployment.
+    discover_hosts
 
     # provide a check that the right db was running
     # the path are different for fedora and red hat.
@@ -657,19 +732,6 @@ else
             exit 1
         fi
     fi
-
-    if [[ "$DEVSTACK_GATE_TOPOLOGY" != "aio" ]] && [[ $DEVSTACK_GATE_NEUTRON -eq "1" ]]; then
-        # NOTE(afazekas): The cirros lp#1301958 does not support MTU setting via dhcp,
-        # simplest way the have tunneling working, with dvsm, without increasing the host system MTU
-        # is to decreasion the MTU on br-ex
-        # TODO(afazekas): Configure the mtu smarter on the devstack side
-        MTU_NODES=primary
-        if [[ "$DEVSTACK_GATE_NEUTRON_DVR" -eq "1" ]]; then
-            MTU_NODES=all
-        fi
-        $ANSIBLE "$MTU_NODES" -f 5 -i "$WORKSPACE/inventory" -m shell \
-                -a "sudo ip link set mtu $EXTERNAL_BRIDGE_MTU dev br-ex"
-    fi
 fi
 
 if [[ "$DEVSTACK_GATE_UNSTACK" -eq "1" ]]; then
@@ -689,28 +751,7 @@ if [[ "$DEVSTACK_GATE_EXERCISES" -eq "1" ]]; then
         -a "cd '$BASE/new/devstack' && sudo -H -u stack ./exercise.sh"
 fi
 
-function load_subunit_stream {
-    local stream=$1;
-    pushd $BASE/new/tempest/
-    sudo testr load --force-init $stream
-    popd
-}
-
-
 if [[ "$DEVSTACK_GATE_TEMPEST" -eq "1" ]]; then
-    #TODO(mtreinish): This if block can be removed after all the nodepool images
-    # are built using with streams dir instead
-    echo "Loading previous tempest runs subunit streams into testr"
-    if [[ -f /opt/git/openstack/tempest/.testrepository/0 ]]; then
-        temp_stream=`mktemp`
-        subunit-1to2 /opt/git/openstack/tempest/.testrepository/0 > $temp_stream
-        load_subunit_stream $temp_stream
-    elif [[ -d /opt/git/openstack/tempest/preseed-streams ]]; then
-        for stream in /opt/git/openstack/tempest/preseed-streams/* ; do
-            load_subunit_stream $stream
-        done
-    fi
-
     # under tempest isolation tempest will need to write .tox dir, log files
     if [[ -d "$BASE/new/tempest" ]]; then
         sudo chown -R tempest:stack $BASE/new/tempest
@@ -740,6 +781,16 @@ if [[ "$DEVSTACK_GATE_TEMPEST" -eq "1" ]]; then
         exit 0
     fi
 
+    # There are some parts of devstack that call the neutron api to verify the
+    # extension. We should not ever trust this for gate testing. This checks to
+    # ensure on master we always are using the default value. (on stable we hard
+    # code a list of available extensions so we can't use this)
+    neutron_extensions=$(iniget "$BASE/new/tempest/etc/tempest.conf" "neutron-feature-enabled" "api_extensions")
+    if [[ $GIT_BRANCH == 'master' && ($neutron_extensions == 'all' || $neutron_extensions == '') ]] ; then
+        echo "Devstack misconfugred tempest and changed the value of api_extensions"
+        exit 1
+    fi
+
     # From here until the end we rely on the fact that all the code fails if
     # something is wrong, to enforce exit on bad test results.
     set -o errexit
@@ -753,14 +804,16 @@ if [[ "$DEVSTACK_GATE_TEMPEST" -eq "1" ]]; then
     if [[ "$DEVSTACK_GATE_TEMPEST_REGEX" != "" ]] ; then
         if [[ "$DEVSTACK_GATE_TEMPEST_ALL_PLUGINS" -eq "1" ]]; then
             echo "Running tempest with plugins and a custom regex filter"
-            $TEMPEST_COMMAND -eall-plugin -- --concurrency=$TEMPEST_CONCURRENCY $DEVSTACK_GATE_TEMPEST_REGEX
+            $TEMPEST_COMMAND -eall-plugin -- $DEVSTACK_GATE_TEMPEST_REGEX --concurrency=$TEMPEST_CONCURRENCY
+            sudo -H -u tempest .tox/all-plugin/bin/tempest list-plugins
         else
             echo "Running tempest with a custom regex filter"
-            $TEMPEST_COMMAND -eall -- --concurrency=$TEMPEST_CONCURRENCY $DEVSTACK_GATE_TEMPEST_REGEX
+            $TEMPEST_COMMAND -eall -- $DEVSTACK_GATE_TEMPEST_REGEX --concurrency=$TEMPEST_CONCURRENCY
         fi
     elif [[ "$DEVSTACK_GATE_TEMPEST_ALL_PLUGINS" -eq "1" ]]; then
         echo "Running tempest all-plugins test suite"
         $TEMPEST_COMMAND -eall-plugin -- --concurrency=$TEMPEST_CONCURRENCY
+        sudo -H -u tempest .tox/all-plugin/bin/tempest list-plugins
     elif [[ "$DEVSTACK_GATE_TEMPEST_ALL" -eq "1" ]]; then
         echo "Running tempest all test suite"
         $TEMPEST_COMMAND -eall -- --concurrency=$TEMPEST_CONCURRENCY
@@ -773,12 +826,6 @@ if [[ "$DEVSTACK_GATE_TEMPEST" -eq "1" ]]; then
     elif [[ "$DEVSTACK_GATE_TEMPEST_STRESS" -eq "1" ]] ; then
         echo "Running stress tests"
         $TEMPEST_COMMAND -estress -- $DEVSTACK_GATE_TEMPEST_STRESS_ARGS
-    elif [[ "$DEVSTACK_GATE_TEMPEST_HEAT_SLOW" -eq "1" ]] ; then
-        echo "Running slow heat tests"
-        $TEMPEST_COMMAND -eheat-slow -- --concurrency=$TEMPEST_CONCURRENCY
-    elif [[ "$DEVSTACK_GATE_TEMPEST_LARGE_OPS" -ge "1" ]] ; then
-        echo "Running large ops tests"
-        $TEMPEST_COMMAND -elarge-ops -- --concurrency=$TEMPEST_CONCURRENCY
     elif [[ "$DEVSTACK_GATE_SMOKE_SERIAL" -eq "1" ]] ; then
         echo "Running tempest smoke tests"
         $TEMPEST_COMMAND -esmoke-serial

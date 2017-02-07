@@ -1,0 +1,12 @@
+---
+- hosts: all
+  gather_facts: yes
+  vars_files:
+    - devstack_gate_vars.yaml
+  roles:
+    - gather_host_info
+    - fix_etc_hosts
+    - create_base_folder
+    - start_fresh_logging
+    - setup_stack_user
+    - setup_tempest_user
