@@ -117,32 +117,6 @@ function _http_check {
     done
 }
 
-# do a few network tests to baseline how bad we are
-function network_sanity_check {
-    echo "Performing network sanity check..."
-    PIP_CONFIG_FILE=/etc/pip.conf
-    if [[ -f $PIP_CONFIG_FILE ]]; then
-        line=$(cat $PIP_CONFIG_FILE|grep --max-count 1 index-url)
-        pypi_url=${line#*=}
-        pypi_host=$(echo $pypi_url|grep -Po '.*?//\K.*?(?=/)')
-
-        _ping_check $pypi_host
-        _http_check $pypi_url
-    fi
-
-    if [[ -f /etc/nodepool/provider ]]; then
-        # AFS ubuntu mirror
-        source /etc/nodepool/provider
-        if [[ -n "$NODEPOOL_MIRROR_HOST" || ( -n "$NODEPOOL_REGION" && -n "$NODEPOOL_CLOUD" ) ]]; then
-            NODEPOOL_MIRROR_HOST=${NODEPOOL_MIRROR_HOST:-mirror.$NODEPOOL_REGION.$NODEPOOL_CLOUD.openstack.org}
-            NODEPOOL_MIRROR_HOST=$(echo $NODEPOOL_MIRROR_HOST|tr '[:upper:]' '[:lower:]')
-
-            _ping_check $NODEPOOL_MIRROR_HOST
-            _http_check http://$NODEPOOL_MIRROR_HOST/ubuntu/dists/trusty/Release
-        fi
-    fi
-}
-
 # create the start timer for when the job began
 function start_timer {
     # first make sure the time is right, so we don't go into crazy land
@@ -574,34 +548,6 @@ function setup_workspace {
     $xtrace
 }
 
-function copy_mirror_config {
-    # The pydistutils.cfg file is added by Puppet. Some CIs may not rely on
-    # Puppet to do the base node installation
-    if [ -f ~/.pydistutils.cfg ]; then
-        sudo install -D -m0644 -o root -g root ~/.pydistutils.cfg ~root/.pydistutils.cfg
-
-        sudo install -D -m0644 -o stack -g stack ~/.pydistutils.cfg ~stack/.pydistutils.cfg
-
-        sudo install -D -m0644 -o tempest -g tempest ~/.pydistutils.cfg ~tempest/.pydistutils.cfg
-    fi
-}
-
-function setup_host {
-    # Enabled detailed logging, since output of this function is redirected
-    local xtrace=$(set +o | grep xtrace)
-    set -o xtrace
-
-    # Ensure that all of the users have the openstack mirror config
-    copy_mirror_config
-
-    # perform network sanity check so that we can characterize the
-    # state of the world
-    network_sanity_check
-
-    # Disable detailed logging as we return to the main script
-    $xtrace
-}
-
 function archive_test_artifact {
     local filename=$1
 
@@ -665,10 +611,10 @@ function process_stackviz {
         cp -r $stackviz_path/build $log_path/stackviz
 
         pushd $project_path
-        if [ -f $BASE/new/dstat-csv.txt ]; then
+        if [ -f $log_path/dstat-csv_log.txt ]; then
             sudo testr last --subunit | stackviz-export \
-                --dstat $BASE/new/dstat-csv.txt \
-                --end --stdin \
+                --dstat $log_path/dstat-csv_log.txt \
+                --env --stdin \
                 $log_path/stackviz/data
         else
             sudo testr last --subunit | stackviz-export \
@@ -1069,7 +1015,7 @@ function ovs_vxlan_bridge {
         local ovs_package='openvswitch-switch'
         local ovs_service='openvswitch-switch'
     else
-        echo "Unsupported platform, can't determine ntp service"
+        echo "Unsupported platform, can't determine openvswitch service"
         exit 1
     fi
     local install_ovs_deps="source $BASE/new/devstack/functions-common; \

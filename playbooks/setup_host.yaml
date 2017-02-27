@@ -10,3 +10,5 @@
     - start_fresh_logging
     - setup_stack_user
     - setup_tempest_user
+    - copy_mirror_config
+    - network_sanity_check

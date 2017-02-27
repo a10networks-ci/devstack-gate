@@ -29,7 +29,7 @@ GIT_BRANCH=${GIT_BRANCH:-master}
 # possible that new ansible releases can break us. As such we should
 # be very deliberate about which ansible we use.
 ANSIBLE_VERSION=${ANSIBLE_VERSION:-2.2.0.0}
-export DSTOOLS_VERSION=${DSTOOLS_VERSION:-0.1.4}
+export DSTOOLS_VERSION=${DSTOOLS_VERSION:-0.2.1}
 
 # sshd may have been compiled with a default path excluding */sbin
 export PATH=$PATH:/usr/local/sbin:/usr/sbin
@@ -263,9 +263,9 @@ export DEVSTACK_PROJECT_FROM_GIT=${DEVSTACK_PROJECT_FROM_GIT:-}
 # for a stable branch we want to both try to upgrade forward n => n+1 as
 # well as upgrade from last n-1 => n.
 #
-# i.e. stable/juno:
-#   pullup means stable/icehouse => stable/juno
-#   forward means stable/juno => master (or stable/kilo if that's out)
+# i.e. stable/ocata:
+#   pullup means stable/newton => stable/ocata
+#   forward means stable/ocata => master (or stable/pike if that's out)
 export DEVSTACK_GATE_GRENADE=${DEVSTACK_GATE_GRENADE:-}
 
 # the branch name for selecting grenade branches
@@ -304,13 +304,7 @@ if [[ -n "$DEVSTACK_GATE_GRENADE" ]]; then
         # forward upgrades are an attempt to migrate up from an
         # existing stable branch to the next release.
         forward)
-            if [[ "$GRENADE_BASE_BRANCH" == "stable/icehouse" ]]; then
-                export GRENADE_OLD_BRANCH="stable/icehouse"
-                export GRENADE_NEW_BRANCH="stable/juno"
-            elif [[ "$GRENADE_BASE_BRANCH" == "stable/juno" ]]; then
-                export GRENADE_OLD_BRANCH="stable/juno"
-                export GRENADE_NEW_BRANCH="stable/kilo"
-            elif [[ "$GRENADE_BASE_BRANCH" == "stable/kilo" ]]; then
+            if [[ "$GRENADE_BASE_BRANCH" == "stable/kilo" ]]; then
                 export GRENADE_OLD_BRANCH="stable/kilo"
                 export GRENADE_NEW_BRANCH="stable/liberty"
             elif [[ "$GRENADE_BASE_BRANCH" == "stable/liberty" ]]; then
@@ -322,19 +316,16 @@ if [[ -n "$DEVSTACK_GATE_GRENADE" ]]; then
             elif [[ "$GRENADE_BASE_BRANCH" == "stable/newton" ]]; then
                 export GRENADE_OLD_BRANCH="stable/newton"
                 export GRENADE_NEW_BRANCH="$GIT_BRANCH"
+            elif [[ "$GRENADE_BASE_BRANCH" == "stable/ocata" ]]; then
+                export GRENADE_OLD_BRANCH="stable/ocata"
+                export GRENADE_NEW_BRANCH="$GIT_BRANCH"
             fi
             ;;
 
         # pullup upgrades are our normal upgrade test. Can you upgrade
         # to the current patch from the last stable.
         pullup)
-            if [[ "$GRENADE_BASE_BRANCH" == "stable/juno" ]]; then
-                export GRENADE_OLD_BRANCH="stable/icehouse"
-                export GRENADE_NEW_BRANCH="stable/juno"
-            elif [[ "$GRENADE_BASE_BRANCH" == "stable/kilo" ]]; then
-                export GRENADE_OLD_BRANCH="stable/juno"
-                export GRENADE_NEW_BRANCH="stable/kilo"
-            elif [[ "$GRENADE_BASE_BRANCH" == "stable/liberty" ]]; then
+            if [[ "$GRENADE_BASE_BRANCH" == "stable/liberty" ]]; then
                 export GRENADE_OLD_BRANCH="stable/kilo"
                 export GRENADE_NEW_BRANCH="stable/liberty"
             elif [[ "$GRENADE_BASE_BRANCH" == "stable/mitaka" ]]; then
@@ -343,8 +334,11 @@ if [[ -n "$DEVSTACK_GATE_GRENADE" ]]; then
             elif [[ "$GRENADE_BASE_BRANCH" == "stable/newton" ]]; then
                 export GRENADE_OLD_BRANCH="stable/mitaka"
                 export GRENADE_NEW_BRANCH="stable/newton"
-            else # master
+            elif [[ "$GRENADE_BASE_BRANCH" == "stable/ocata" ]]; then
                 export GRENADE_OLD_BRANCH="stable/newton"
+                export GRENADE_NEW_BRANCH="stable/ocata"
+            else # master
+                export GRENADE_OLD_BRANCH="stable/ocata"
                 export GRENADE_NEW_BRANCH="$GIT_BRANCH"
             fi
             ;;
@@ -481,9 +475,11 @@ sudo -H pip install virtualenv
 virtualenv /tmp/ansible
 # NOTE(emilien): workaround to avoid installing cryptography
 # https://github.com/ansible/ansible/issues/15665
-/tmp/ansible/bin/pip install paramiko==1.16.0 ansible==$ANSIBLE_VERSION ara
+/tmp/ansible/bin/pip install paramiko==1.16.0 ansible==$ANSIBLE_VERSION \
+                     devstack-tools==$DSTOOLS_VERSION ara
 export ANSIBLE=/tmp/ansible/bin/ansible
 export ANSIBLE_PLAYBOOK=/tmp/ansible/bin/ansible-playbook
+export DSCONF=/tmp/ansible/bin/dsconf
 
 # Write inventory file with groupings
 COUNTER=1
@@ -551,8 +547,6 @@ EOF
 echo "... this takes a few seconds (logs at logs/devstack-gate-setup-host.txt.gz)"
 $ANSIBLE_PLAYBOOK -f 5 -i "$WORKSPACE/inventory" "$WORKSPACE/devstack-gate/playbooks/setup_host.yaml" \
     &> "$WORKSPACE/logs/devstack-gate-setup-host.txt"
-$ANSIBLE all -f 5 -i "$WORKSPACE/inventory" -m shell \
-    -a "$(run_command setup_host)" &>> "$WORKSPACE/logs/devstack-gate-setup-host.txt"
 
 if [ -n "$DEVSTACK_GATE_GRENADE" ]; then
     start=$(date +%s)
@@ -654,6 +648,6 @@ $ANSIBLE subnodes -f 5 -i "$WORKSPACE/inventory" -m synchronize \
 sudo mv $WORKSPACE/devstack-gate-cleanup-host.txt $BASE/logs/
 
 # Generate ARA report
-/tmp/ansible/bin/ara generate $BASE/logs/ara
+/tmp/ansible/bin/ara generate html $BASE/logs/ara
 
 exit $RETVAL
