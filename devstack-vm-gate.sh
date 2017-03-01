@@ -377,6 +377,7 @@ function setup_localrc {
     # force stack on trusty
     if [[ "$UBUNTU_RELEASE" == "trusty"]]; then
         localrc_set "$localrc_file" "FORCE" "yes"
+    fi
 
     if [[ "$DEVSTACK_GATE_TOPOLOGY" == "multinode" ]] && [[ $DEVSTACK_GATE_NEUTRON -eq "1" ]]; then
         # Reduce the MTU on br-ex to match the MTU of underlying tunnels
