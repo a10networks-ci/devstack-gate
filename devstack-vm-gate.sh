@@ -52,7 +52,7 @@ FIXED_RANGE=${DEVSTACK_GATE_FIXED_RANGE:-10.1.0.0/20}
 IPV4_ADDRS_SAFE_TO_USE=${DEVSTACK_GATE_IPV4_ADDRS_SAFE_TO_USE:-${DEVSTACK_GATE_FIXED_RANGE:-10.1.0.0/20}}
 FLOATING_RANGE=${DEVSTACK_GATE_FLOATING_RANGE:-172.24.5.0/24}
 PUBLIC_NETWORK_GATEWAY=${DEVSTACK_GATE_PUBLIC_NETWORK_GATEWAY:-172.24.5.1}
-UBUNTU_RELEASE=$(lsb_release -c | cut -d: -f2 | awk '{print $1}')
+
 # The next two values are used in multinode testing and are related
 # to the floating range. For multinode test envs to know how to route
 # packets to floating IPs on other hosts we put addresses on the compute
@@ -375,9 +375,7 @@ function setup_localrc {
     localrc_set "$localrc_file" "EBTABLES_RACE_FIX" "True"
 
     # force stack on trusty
-    if [[ "$UBUNTU_RELEASE" == "trusty"]]; then
-        localrc_set "$localrc_file" "FORCE" "yes"
-    fi
+    localrc_set "$localrc_file" "FORCE" "yes"
 
     if [[ "$DEVSTACK_GATE_TOPOLOGY" == "multinode" ]] && [[ $DEVSTACK_GATE_NEUTRON -eq "1" ]]; then
         # Reduce the MTU on br-ex to match the MTU of underlying tunnels
