@@ -46,6 +46,18 @@ source $WORKSPACE/devstack-gate/functions.sh
 
 start_timer
 
+# Note that service/project enablement vars are here so that they can be
+# used to select the PROJECTS list below reliably.
+
+# Set to 1 to run sahara
+export DEVSTACK_GATE_SAHARA=${DEVSTACK_GATE_SAHARA:-0}
+
+# Set to 1 to run trove
+export DEVSTACK_GATE_TROVE=${DEVSTACK_GATE_TROVE:-0}
+
+# are we pulling any libraries from git
+export DEVSTACK_PROJECT_FROM_GIT=${DEVSTACK_PROJECT_FROM_GIT:-}
+
 # Save the PROJECTS variable as it was passed in.  This is needed for reproduce.sh
 # incase the job definition contains items that are not in the "global" list
 # below.
@@ -80,15 +92,12 @@ PROJECTS="openstack/tempest-lib $PROJECTS"
 # which is not free.
 PROJECTS="openstack-infra/tripleo-ci $PROJECTS"
 PROJECTS="openstack/automaton $PROJECTS"
-PROJECTS="openstack/cliff $PROJECTS"
-PROJECTS="openstack/debtcollector $PROJECTS"
 # The devstack heat plugin uses these repos
 if [[ "$DEVSTACK_GATE_HEAT" -eq "1" ]] ; then
     PROJECTS="openstack/dib-utils $PROJECTS"
     PROJECTS="openstack/diskimage-builder $PROJECTS"
 fi
 PROJECTS="openstack/django_openstack_auth $PROJECTS"
-PROJECTS="openstack/futurist $PROJECTS"
 PROJECTS="openstack/manila $PROJECTS"
 PROJECTS="openstack/manila-ui $PROJECTS"
 PROJECTS="openstack/zaqar $PROJECTS"
@@ -121,16 +130,25 @@ PROJECTS="openstack/oslo.serialization $PROJECTS"
 PROJECTS="openstack/oslo.service $PROJECTS"
 PROJECTS="openstack/oslo.versionedobjects $PROJECTS"
 PROJECTS="openstack/oslo.vmware $PROJECTS"
-PROJECTS="openstack/pycadf $PROJECTS"
-PROJECTS="openstack/sahara $PROJECTS"
-PROJECTS="openstack/sahara-dashboard $PROJECTS"
-PROJECTS="openstack/stevedore $PROJECTS"
+if [[ "$DEVSTACK_GATE_SAHARA" -eq "1" ]] ; then
+    PROJECTS="openstack/sahara $PROJECTS"
+    PROJECTS="openstack/sahara-dashboard $PROJECTS"
+fi
 PROJECTS="openstack/taskflow $PROJECTS"
 PROJECTS="openstack/tooz $PROJECTS"
 PROJECTS="openstack/tripleo-heat-templates $PROJECTS"
 PROJECTS="openstack/tripleo-image-elements $PROJECTS"
 PROJECTS="openstack/tripleo-incubator $PROJECTS"
-PROJECTS="openstack/trove $PROJECTS"
+if [[ "$DEVSTACK_GATE_TROVE" -eq "1" ]] ; then
+    PROJECTS="openstack/trove $PROJECTS"
+fi
+if [[ -n "$DEVSTACK_PROJECT_FROM_GIT" ]] ; then
+    # We populate the PROJECTS list with any libs that should be installed
+    # from source and not pypi assuming that live under openstack/
+    TRAILING_COMMA_REMOVED=$(echo "$DEVSTACK_PROJECT_FROM_GIT" | sed -e 's/,$//')
+    PROCESSED_FROM_GIT=$(echo "openstack/$TRAILING_COMMA_REMOVED" | sed -e 's/,/ openstack\//g')
+    PROJECTS="$PROCESSED_FROM_GIT $PROJECTS"
+fi
 
 # Remove duplicates as they result in errors when managing
 # git state.
@@ -165,9 +183,6 @@ export DEVSTACK_GATE_ZEROMQ=${DEVSTACK_GATE_ZEROMQ:-0}
 # Set to qpid to use qpid, or zeromq to use zeromq.
 # Default set to rabbitmq
 export DEVSTACK_GATE_MQ_DRIVER=${DEVSTACK_GATE_MQ_DRIVER:-"rabbitmq"}
-
-# Set to 1 to run tempest stress tests
-export DEVSTACK_GATE_TEMPEST_STRESS=${DEVSTACK_GATE_TEMPEST_STRESS:-0}
 
 # This value must be provided when DEVSTACK_GATE_TEMPEST_STRESS is set.
 export DEVSTACK_GATE_TEMPEST_STRESS_ARGS=${DEVSTACK_GATE_TEMPEST_STRESS_ARGS:-""}
@@ -237,12 +252,6 @@ export DEVSTACK_GATE_IRONIC_DRIVER=${DEVSTACK_GATE_IRONIC_DRIVER:-pxe_ssh}
 # Set to 0 to avoid building Ironic deploy ramdisks
 export DEVSTACK_GATE_IRONIC_BUILD_RAMDISK=${DEVSTACK_GATE_IRONIC_BUILD_RAMDISK:-1}
 
-# Set to 1 to run sahara
-export DEVSTACK_GATE_SAHARA=${DEVSTACK_GATE_SAHARA:-0}
-
-# Set to 1 to run trove
-export DEVSTACK_GATE_TROVE=${DEVSTACK_GATE_TROVE:-0}
-
 # Set to 0 to disable config_drive and use the metadata server instead
 export DEVSTACK_GATE_CONFIGDRIVE=${DEVSTACK_GATE_CONFIGDRIVE:-0}
 
@@ -255,9 +264,6 @@ if [ ${DEFAULT_CONCURRENCY} -gt 3 ] ; then
     DEFAULT_CONCURRENCY=$((${DEFAULT_CONCURRENCY} / 2))
 fi
 export TEMPEST_CONCURRENCY=${TEMPEST_CONCURRENCY:-${DEFAULT_CONCURRENCY}}
-
-# are we pulling any libraries from git
-export DEVSTACK_PROJECT_FROM_GIT=${DEVSTACK_PROJECT_FROM_GIT:-}
 
 # The following variable is set for different directions of Grenade updating
 # for a stable branch we want to both try to upgrade forward n => n+1 as
@@ -366,6 +372,9 @@ export DEVSTACK_GATE_TEMPEST_FULL=${DEVSTACK_GATE_TEMPEST_FULL:-0}
 
 # Set to 1 to run all tempest tests
 export DEVSTACK_GATE_TEMPEST_ALL=${DEVSTACK_GATE_TEMPEST_ALL:-0}
+
+# Set to 1 to run all tempest scenario tests
+export DEVSTACK_GATE_TEMPEST_SCENARIOS=${DEVSTACK_GATE_TEMPEST_SCENARIOS:-0}
 
 # Set to a regex to run tempest with a custom regex filter
 export DEVSTACK_GATE_TEMPEST_REGEX=${DEVSTACK_GATE_TEMPEST_REGEX:-""}
